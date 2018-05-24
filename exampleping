@@ -1,0 +1,205 @@
+#!/usr/bin/perl
+################################
+# Author: Mike Cantrell
+# Date Intial Version: 22 May 2018
+################################
+################################
+# Program Name: exampleping
+# Description:  A sample program that uses linux command line tools to ping urls/ip addresses and displays the # of attempts # of success min/max/avg response time and current jitter (difference of last response time to the previous response time).    
+#
+# Input:  command line arguments see usage for detials
+# Output:  Displays output to stdout does not persist
+# Dependancies: Linux ping, ;Perl CPAN Modules Getopt::Std
+################################
+################################
+# Vesion:      Date:        Author:
+#  1.0.0       22 May 2018   MLC
+################################
+################################
+
+use strict;
+use Getopt::Std;
+use threads;
+use threads::shared;
+
+##  Initialization / Validation section
+my %opts=();
+my $dur = "600";
+my $delay = "2";
+my $refresh = "20";
+my @urls = ();
+my %results :shared;
+my ($durl,$attempts,$received,$percent,$recent,$min,$max,$avg,$jitter) =();
+
+# Check command line opts to print help if -h and that either the -f or -u was passed
+getopts("f:u:t:s:r:h" , \%opts);
+if (((!defined $opts{f}) && (!defined $opts{u})) || (defined $opts{h})){
+usage();
+exit;
+}
+
+# read input into variables
+if (defined $opts{t}){ $dur = (int($opts{t}) * '60')};
+if (defined $opts{s}){ $delay = int($opts{s})};
+if (defined $opts{r}){ $refresh = int($opts{r})};
+if (defined $opts{f}){
+    if (-e $opts{f}) {
+        open my $urlfile, '<', $opts{f};
+        chomp(@urls = <$urlfile>);
+        close $urlfile;
+    } else{ 
+        printf (" File $opts{f} does not exist \n");
+        exit;
+    }
+} else {
+
+    @urls = $opts{u};
+}
+# set the run time length using either defaults or passed params
+my $ctime = localtime();
+my $etime = localtime(time + $dur);
+
+# Build out hash for each url values set to 0
+buildhash(@urls);
+
+## Main Section
+
+# ping threads
+my $urlsize = @urls-1 ;
+
+my @pthr = ();
+for (my $i =0;$i<=$urlsize;$i++){
+    push (@pthr, (threads->create("pingurl", $urls[$i] ,\%results ))) ;
+ #   threads->create("pingurl", $urls[$i] ,\%results )
+ }
+
+# display thread
+my $thr = threads->create("printhash");
+$thr->join();
+
+# join all ping threads to ensure proper closurer
+foreach my $pthr (@pthr){
+   $pthr->join();
+}
+exit;
+#end main
+
+## Functions list in order with description
+#
+# usage - function that prints out the usage help
+# buildhash - function that takes the url array and builds out the multilevel hash intialized to zero 
+# pingurl - function that takes a url/ip address runs the linux ping command , parses/stores the results in the results hash
+# printhash - function to output the resutls hash to a terminal
+
+sub usage{
+printf ("exampleping -f filename [-u url], [-t hours] n [-s seconds] [-h] \n");
+printf ("   -f filename -  a file with a list of urls to ping one url / ipaddress per line \n");
+printf ("   -u url - a single url to ping cannot be used with -f \n");
+printf ("   -t hours - the number of minutes to run; optional - default is 10 minute \n");
+printf ("   -s seconds - number of seconds in between ping attempts; optional default is 2 seconds \n");
+printf ("   -r seconds - number of seconds for the output screen refresh; optional default is 20 seconds \n");
+printf ("   -h - prints this help \n ");
+
+}
+
+sub buildhash{
+    my @hurl = @_;
+    foreach my $hurl (@hurl){
+        $results{"$hurl"}= shared_clone({'attempts' => '0'});
+        $results{shared_clone($hurl)}{'received'} = 0 ;
+        $results{shared_clone($hurl)}{'min'} = 100000000 ; # need a large number not 0 for min
+        $results{shared_clone($hurl)}{'max'} = 0 ;
+        $results{shared_clone($hurl)}{'recent'} = 0 ;
+        $results{shared_clone($hurl)}{'sum'} = 0 ;
+        $results{shared_clone($hurl)}{'avg'} = 0 ;
+        $results{shared_clone($hurl)}{'jitter'} = 0 ;
+        
+}
+
+}
+
+sub pingurl{
+    my $purl = $_[0];
+    while ($ctime le $etime){
+        my @pingres = qx(ping -c 1 $purl);
+        my @trans = grep {/transmitted/}  @pingres;
+        my @rtimes = grep{/avg/} @pingres;
+        foreach my $el (@trans) {
+            my @temparr = split(/ /,$el);
+            my $tmpval = $results{$purl}{'attempts'};
+            $results{$purl}{'attempts'} = $tmpval + $temparr[0];
+            my $tmpval = $results{$purl}{'received'};
+            $results{$purl}{'received'} =  $tmpval + $temparr[3];
+            
+        }
+        foreach my $ele (@rtimes){
+                my @temparra = split(/=/,$ele);
+                @temparra = split(/\//, $temparra[1]);
+                if ($temparra[0] <= $results{$purl}{'min'}){
+                    $results{$purl}{'min'} = $temparra[0];
+                }
+                if ($temparra[0] >= $results{$purl}{'max'}){
+                    $results{$purl}{'max'} = $temparra[0];
+                    }
+                if ($results{$purl}{'recent'} >=  $temparra[0]){
+                    my $tjtr = $results{$purl}{'recent'};
+                    $results{$purl}{'jitter'} = ($tjtr - $temparra[0]);
+                } else{
+                    my $tjtr = $results{$purl}{'recent'};
+                    $results{$purl}{'jitter'} = ($temparra[0] - $tjtr);
+                }
+                $results{$purl}{'recent'} = $temparra[0];
+                $results{$purl}{'sum'} = $results{$purl}{'sum'} + $temparra[0];
+                if ($results{$purl}{'received'} != '0'){
+                    $results{$purl}{'avg'} = ($results{$purl}{'sum'} / $results{$purl}{'received'});
+                } else {
+                    $results{$purl}{'avg'} = '0';
+                }
+        }
+        
+        sleep ($delay);
+        $ctime = localtime();
+    }
+ threads->exit(0);     
+}
+
+
+sub printhash{
+
+format HEADER_PING =
+*******************************************************************************
+URL/IP ADDRESS           Sent Recvd Percent Recent  Min    Max   Avg    Jitter
+*******************************************************************************
+.
+
+format DATA_PING =
+@<<<<<<<<<<<<<<<<<<<<<<< @||| @|||| @|||||| @||||| @<<<<< @<<<<< @<<<<< @<<<<<
+$durl,$attempts,$received,$percent,$recent,$min,$max,$avg,$jitter
+.
+
+do {
+    system("clear");
+    select(STDOUT);
+    $~ = "DATA_PING";
+    $^ = "HEADER_PING";
+
+    foreach $durl (sort keys %results){
+                $attempts = $results{$durl}{'attempts'};
+                $received = $results{$durl}{'received'};
+                if ($results{$durl}{'attempts'} != '0'){
+                    $percent = (($results{$durl}{'received'} / $results{$durl}{'attempts'})*100);
+                } else {$percent = '0'};    
+                $recent = $results{$durl}{'recent'};
+                $min = $results{$durl}{'min'};
+                $max = $results{$durl}{'max'};
+                $avg = $results{$durl}{'avg'};
+                $jitter = $results{$durl}{'jitter'};
+                write;
+    }
+    sleep ($refresh);
+    $ctime = localtime();
+    $- = '0';
+    
+} while ($ctime le $etime);
+threads->exit(0);
+}
